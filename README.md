@@ -11,7 +11,7 @@
 # 需要引入的js
 > 标线使用两个js文件(es6编写):  
 >>1、src/components/Nav/DrawLine/DrawTools.js，包含了绘制线所需要的一些工具函数  
->>2、src/components/Nav/DrawLine/DrawLine.js，绘制线的主函数，在它内部已经导入了DrawTools.js，
+>>2、src/components/Nav/DrawLine/DrawLine.js，绘制线的主函数，在它内部已经导入了DrawTools.js  
 例子可以参照：  
 src/components/Nav/DrawLine/Line.vue
 
