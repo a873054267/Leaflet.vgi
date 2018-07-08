@@ -137,8 +137,9 @@ let Animation = {
     // 点击地图，取消闪烁效果
     map.once('click', this.cancelTwinkle.bind(this));
     // 添加三角形
-    if (type == 'line')
+    if (type == 'line'){
       this.attach.drawTriangles();
+    }
   },
   /**
    * 取消闪烁
@@ -156,6 +157,7 @@ let Animation = {
     this.hoverEventRegister();
     // 移除三角形
     this.attach.triangles.remove();
+    this.attach.triangles.cancelZoom();
   }
 }
 
@@ -795,15 +797,16 @@ let Lines = {
 let Triangles = {
   initialize (latLngs) {
     this.latLngs = latLngs;
-    // 利用绑定传递参数，同时也方便后期移除该事件
-    this.redrawTrianglesBindFn = this.redraw.bind(this);
-    // 地图级别变化，需要重绘箭头
-    map.on('zoomend', this.redrawTrianglesBindFn);
   },
   /**
    * 地图级别变化，线上的三角形需要重绘
    */
   redraw (latLngs) {
+    this.cancelZoom ();
+    // 利用绑定传递参数，同时也方便后期移除该事件
+    this.redrawTrianglesBindFn = this.redraw.bind(this, this.latLngs);
+    // 地图级别变化，需要重绘箭头
+    map.on('zoomend', this.redrawTrianglesBindFn);
     if (latLngs)
       this.latLngs = latLngs;
     this.remove();
@@ -842,8 +845,12 @@ let Triangles = {
       map.removeLayer(this.triangleLayerGroup);
       this.triangleLayerGroup = null;
     }
+  },
+  cancelZoom () {
     // 取消地图缩放事件
-    map.off('zoomend', this.redrawTrianglesBindFn);
+    if (this.redrawTrianglesBindFn){
+      map.off('zoomend', this.redrawTrianglesBindFn);
+    }
   }
 }
 
@@ -971,7 +978,7 @@ let LineCircles = {
     evtMgr.fire('on-drawComplete');
     // 2、事件监听端点样式设置
     this.completeCommon();
-    // 3、绘制三角形
+    // // 3、绘制三角形
     this.drawTriangles();
     // 4、线动画闪烁
     this.line.twinkle('line');
