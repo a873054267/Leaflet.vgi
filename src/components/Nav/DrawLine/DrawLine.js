@@ -7,6 +7,10 @@ let evtMgr = new L.Evented();
 let map;
 // 唯一ID，用来标识图形
 let lastId = 0;
+// 拖拽移动线缓存
+let cacheDragLines = [];
+// 缓存被插入新的经纬度的线
+let cacheInsertLines = [];
 
 // 常用样式配置
 const CONFIG = {
@@ -116,8 +120,10 @@ let Util = {
 let Animation = {
   /**
    * 动画闪烁特效
+   * @type 代表当前图形类型：圆或者线
+   * @evt 代表触发动画的动作：点击线或者绘制完成
    */
-  twinkle (type) {
+  twinkle (type, evt) {
     // 触发onceClick，取消上一次动画
     map.fire('click');
     this.toggle = false;
@@ -139,6 +145,15 @@ let Animation = {
     // 添加三角形
     if (type == 'line'){
       this.attach.drawTriangles();
+      // 代表点击事件
+      if (evt) {
+        // 回传当前点击线的数据（id和经纬度）
+        evtMgr.fire('on-lineClick', {
+          params:{
+            attach:self.attach
+          }
+        });
+      }
     }
   },
   /**
@@ -156,8 +171,10 @@ let Animation = {
     // 恢复悬浮事件
     this.hoverEventRegister();
     // 移除三角形
-    this.attach.triangles.remove();
-    this.attach.triangles.cancelZoom();
+    if (this.attach && this.attach.triangles) {
+      this.attach.triangles.remove();
+      this.attach.triangles.cancelZoom();
+    }
   }
 }
 
@@ -200,6 +217,7 @@ let Shape = {
   eventRegister () {
     this.clickEventRegister ();
     this.hoverEventRegister ();
+    this.contextMenuEventRegister();
   },
   /**
    * 事件注册
@@ -207,8 +225,8 @@ let Shape = {
   clickEventRegister () {
     let type = this.getShapeType ();
     this.twinkleBindFn = this.twinkle.bind(this, type);
-    this.back.on('click', this.twinkleBindFn);
-    this.front.on('click', this.twinkleBindFn);
+    this.back.off('click').on('click', this.twinkleBindFn);
+    this.front.off('click').on('click', this.twinkleBindFn);
   },
   /**
    * 悬浮高亮事件
@@ -224,6 +242,36 @@ let Shape = {
       self.hover();
     }).on('mouseout', () => {
       self.out();
+    });
+  },
+  /**
+   * 右键菜单
+   */
+  contextMenuEventRegister () {
+    this.contextmenuBindFn = this.contextmenuHandler.bind(this);
+    this.back.on('contextmenu', this.contextmenuBindFn);
+    this.front.on('contextmenu', this.contextmenuBindFn);
+  },
+  /**
+   * 右键菜单事件处理
+   */
+  contextmenuHandler (evt) {
+    let point = evt.containerPoint;
+    let latLng = evt.latlng;
+    let contextMenu = document.getElementById('contextMenu');
+    let addPoint, deletePoint;
+    // 右键菜单DOM不存在，进行创建
+    if (!contextMenu) {
+      contextMenu = document.createElement('div');
+      contextMenu.id = 'contextMenu';
+      document.body.appendChild(contextMenu);
+    }
+    this.contextmenu(contextMenu, latLng);
+    contextMenu.style.display = 'block';
+    contextMenu.style.left = point.x + 10 + 'px';
+    contextMenu.style.top = point.y + 10 + 'px';
+    map.once('click', () => {
+      contextMenu.style.display = 'none';
     });
   },
   /**
@@ -343,6 +391,22 @@ let Circles = {
     Shape.initialize.call(this, options);
   },
   /**
+   * 右键菜单
+   */
+  contextmenu (cm) {
+    cm.innerHTML = '<ul><li id="deletePoint">删除点</li></ul>';
+    let deletePoint = document.getElementById('deletePoint');
+    let self = this;
+    deletePoint.addEventListener('click', function () {
+      evtMgr.fire('on-lineDeletePoint', {
+        params:{
+          latLng:self.latLng
+        }
+      });
+      cm.style.display = 'none';
+    });
+  },
+  /**
    * 事件监听
    */
   eventRegister () {
@@ -361,9 +425,11 @@ let Circles = {
    * 鼠标按下，开始拖拽
    */
   mouseDown (evt) {
+    map.dragging.disable();
+    // 判断点是否被拖拽的标识
+    this.dragging = false;
     // 存储初始位置
     this.initPoint = evt.containerPoint;
-    map.dragging.disable();
     map.fire('click');
     let latLng = this.latLng;
     // 移动点图层移至最上层，防止被其他图层压盖
@@ -383,6 +449,7 @@ let Circles = {
    * 鼠标拖拽移动中
    */
   mouseMove (evt) {
+    this.dragging = true;
     let latLng = evt.latlng;
     let self = this;
     // 目标线
@@ -422,6 +489,13 @@ let Circles = {
     evtMgr.fire('on-restoreMoveIndexes');
     // 对已存在的圆需要融合成一个圆
     this.sameCirclesToMerge();
+    // 判断点是否被拖拽的标识
+    if (this.dragging){
+      this.dragging = false;
+      // 调用回调函数
+      evtMgr.fire('on-lineDrag');
+    }
+
     // 恢复地图拖动事件
     map.dragging.enable();
   },
@@ -575,7 +649,7 @@ let Circles = {
 
 /**
  * 线类
- * 由前景圆和背景圆组成，前景圆负责展示，背景圆负责动画特效
+ * 由前景线和背景线组成，前景线负责展示，背景线负责动画特效
  */
 let Lines = {
   // 背景线样式
@@ -602,6 +676,8 @@ let Lines = {
     this.latLngs = options.latLngs;
     // 记录线被拖拽移动的点
     this.moveIndexes = [];
+    // 插入的新点
+    this.newInsertIdxes = [];
     // 图形构造函数
     options.shapeFn =  L.polyline;
     // 图形坐标
@@ -625,6 +701,63 @@ let Lines = {
     evtMgr.on('on-lineMoveByLatLng', this.lineMoveByLatLng.bind(this));
     // 索引数组恢复成默认值
     evtMgr.on('on-restoreMoveIndexes', this.restoreMoveIndexes.bind(this));
+  },
+  /**
+   * 右键菜单
+   */
+  contextmenu (cm, latLng) {
+    cm.innerHTML = '<ul><li id="addPoint">添加点</li><li id="deleteLine">删除线</li></ul>';
+    let addPoint = document.getElementById('addPoint');
+    let self = this;
+    addPoint.addEventListener('click', function () {
+      let latLng = this.getAttribute('data-latLng').split(',');
+      latLng = L.latLng(Number(latLng[0]), Number(latLng[1]));
+      self.addPointOnLine(latLng);
+      evtMgr.fire('on-lineAddPoint', {
+        params:{
+          attach:self.attach
+        }
+      });
+      cm.style.display = 'none';
+    });
+    let deleteLine = document.getElementById('deleteLine');
+    deleteLine.addEventListener('click', function () {
+      let lineId = this.getAttribute('data-lineId');
+      evtMgr.fire('on-lineRemove', {
+        params:{
+          lineId
+        }
+      });
+      cm.style.display = 'none';
+    });
+    addPoint.setAttribute('data-latLng', latLng.lat+','+latLng.lng);
+    deleteLine.setAttribute('data-lineId', this.attach.lineId);
+  },
+  /**
+   * 根据经纬度在线上添加点
+   * @param latLng
+   */
+  addPointOnLine (latLng) {
+    let closetPoint = this.getClosetPoint(latLng);
+    let closetLatLng = map.containerPointToLatLng(closetPoint);
+    // 添加圆点
+    evtMgr.fire("on-insertCircle", {
+      params:{
+        latLng:closetLatLng,
+        type:'middle',
+        lineId:this.id
+      }
+    });
+    // 添加经纬度到线上
+    this.insertLatLng({
+      params:{
+        latLng:closetLatLng
+      }
+    });
+    // 三角形如果是显示的，则重绘线上的三角形
+    if (this.attach && this.attach.triangles) {
+      this.attach.triangles.redraw(this.attach.line.latLngs);
+    }
   },
   /**
    * 返回离所给经纬度最近的线上的点
@@ -658,6 +791,11 @@ let Lines = {
         // 线段上的情况
         let distance = L.LineUtil.pointToSegmentDistance(point, start, end);
         if (distance < 1){
+          // 记录新插入的经纬度，为回退操作做准备
+          if (this.newInsertIdxes.length === 0){
+            cacheInsertLines.push(this);
+          }
+          this.newInsertIdxes.push(next);
           latLngs.splice(next, 0, latLng);
           return true;
         }
@@ -679,6 +817,10 @@ let Lines = {
         self.moveIndexes.push(index);
       }
     });
+    // 当前线参与了拖拽
+    if (this.moveIndexes.length > 0) {
+      cacheDragLines.push(this);
+    }
   },
   /**
    * 依靠经纬度移动线
@@ -933,7 +1075,7 @@ let LineCircles = {
    */
   insertCircle (args) {
     let {latLng, type, lineId} = args.params;
-    if (this.line.id != lineId) {
+    if (!this.line || this.line.id != lineId) {
       return;
     }
     let circle = new CirclePair({attach:this, type, latLng, ...CONFIG[type]});
@@ -975,7 +1117,12 @@ let LineCircles = {
    */
   drawCompleted () {
     // 1、绘制完成，事件注销
-    evtMgr.fire('on-drawComplete');
+    let latLngs = this.line.latLngs;
+    evtMgr.fire('on-drawComplete', {
+      params: {
+        attach:this
+      }
+    });
     // 2、事件监听端点样式设置
     this.completeCommon();
     // // 3、绘制三角形
@@ -1031,13 +1178,25 @@ let LineCircles = {
     circle.setStyle(CONFIG[circle.type]);
   },
   /**
+   * 绑定线ID
+   * @param lineId
+   */
+  lineIdBind (lineId) {
+    if (lineId){
+      this.lineId = lineId;
+    }
+  },
+  /**
    * 根据数据进行绘制
    * @param lineData
    */
   drawOld (lineData) {
+    // 当前线ID，针对已存在线进行设置，点击线的时候，需要回传该ID
+    this.lineId = lineData.id;
+    let latLngs = lineData.latLngs;
     // 绘制线
-    for (let l in lineData) {
-      this.draw (lineData[l]);
+    for (let l in latLngs) {
+      this.draw (latLngs[l]);
     }
     // 绘制完成,样式设置，事件监听
     this.completeCommon();
@@ -1135,7 +1294,7 @@ let LineCircles = {
   drawBall (latLng) {
     // 绘制随鼠标移动的圆
     if (!this.ball){
-      this.ball = new CirclePair({type:'end', latLng});
+      this.ball = new CirclePair({type:'end', latLng, ...CONFIG['end']});
     }
   },
   /**
@@ -1176,8 +1335,8 @@ let LineCircles = {
       }
     });
 
-    // 开始端点
-    if(this.circles.length === 0){
+    // 开始端点，并且不是连接点
+    if(this.circles.length === 0 && !isLinkNode){
       type = 'end';
     } else if (isLinkNode) {
       // 连接点
@@ -1219,6 +1378,19 @@ let LineCircles = {
       self.line.move(latLng);
       self.ball.move(latLng);
     });
+  },
+  // 移除当前标线
+  remove () {
+    this.line.remove();
+    this.circles.map(circle => {
+      circle.remove();
+    });
+    this.line = null;
+    this.circles = [];
+    if (this.triangles){
+      this.triangles.remove();
+      this.triangles = null;
+    }
   }
 }
 
@@ -1241,9 +1413,24 @@ let LinesSet = {
   initialize (tdtMap, options) {
     let self = this;
     map = tdtMap;
+    // 线圆组合实例数组
+    this.lineCirclePairs = [];
     // 绘制已有的线
-    let latLngs = options.latLngs || [];
-    latLngs.forEach(lineData => {
+    this.lineDatas = options.lineDatas || [];
+    // 线拖拽完成回调函数
+    this.lineDrag = options.lineDrag;
+    // 线点击回调函数
+    this.lineClick = options.lineClick;
+    // 线绘制完成的回调函数
+    this.lineDrawEnd = options.lineDrawEnd;
+    // 线删除的回调函数
+    this.lineRemove = options.lineRemove;
+    // 线添加点的回调函数
+    this.lineAddPoint = options.lineAddPoint;
+    // 线移除点的回调函数
+    this.lineDeletePoint = options.lineDeletePoint;
+    // 根据线数据自动绘制线
+    this.lineDatas.forEach(lineData => {
       self.draw(lineData);
     });
     // 初始化事件
@@ -1255,10 +1442,114 @@ let LinesSet = {
   initEvent () {
     let self = this;
     // 绘制完成事件监听
-    evtMgr.on('on-drawComplete', ()=>{
+    evtMgr.on('on-drawComplete', (args)=>{
+      // 事件注销
       self.mapEventOff ();
-      if (self.callback) {
-        self.callback();
+      let {attach} = args.params;
+      let lineData = {
+        id:attach.lineId,
+        latLngs:attach.line.latLngs
+      }
+      if (self.lineDrawEnd){
+        let lineIdBindFn = attach.lineIdBind.bind(attach);
+        self.lineDrawEnd(lineData, lineIdBindFn);
+      }
+    });
+    // 线点击回调函数
+    evtMgr.on('on-lineClick', (args) => {
+      let {attach} = args.params;
+      let lineData = {
+        id:attach.lineId,
+        latLngs:attach.line.latLngs
+      }
+      if (self.lineClick){
+        self.lineClick(lineData);
+      }
+    });
+    // 线拖拽结束
+    evtMgr.on('on-lineDrag', () => {
+      let lineDatas = [];
+      cacheDragLines.forEach(line => {
+        let attach = line.attach;
+        let lineData = {
+          id:attach.lineId,
+          latLngs:attach.line.latLngs
+        }
+        lineDatas.push(lineData);
+      });
+
+      if (self.lineDrag){
+        self.lineDrag(lineDatas);
+      }
+
+      // 清除缓存，等待下次拖拽完成，继续存储
+      cacheDragLines = [];
+    });
+
+    // 线删除
+    evtMgr.on('on-lineRemove', (args) => {
+      // 删除地图上的线
+      let {lineId} = args.params;
+      self.remove(lineId);
+      // 线删除回调函数
+      if (self.lineRemove){
+        self.lineRemove(lineId);
+      }
+    });
+
+    // 线添加点
+    evtMgr.on('on-lineAddPoint', (args) => {
+      let {attach} = args.params;
+      let lineData = {
+        id:attach.lineId,
+        latLngs:attach.line.latLngs
+      }
+      if (self.lineAddPoint){
+        self.lineAddPoint(lineData);
+      }
+    });
+
+    evtMgr.on('on-lineDeletePoint', (args) => {
+      let {latLng} = args.params;
+      let movePoint = map.latLngToContainerPoint(latLng);
+      let lineDatas = [];
+      self.lineCirclePairs.map(lineCirclePair => {
+        let line = lineCirclePair.line;
+        let latLngs = line.latLngs;
+        let tempLatLngs = [];
+        for (let l = 0; l < latLngs.length; l++) {
+          let item = latLngs[l];
+          let center = map.latLngToContainerPoint(item);
+
+          if(!DrawTools.isInBounds(movePoint, center, CONFIG.circleBuffer)){
+            tempLatLngs.push(item);
+          }
+        }
+
+        // 二者不相等，说明删除的点在当前线上，需要重绘该线
+        if (tempLatLngs.length != latLngs.length) {
+          line.redraw(tempLatLngs);
+          let lineData = {
+            lineId:lineCirclePair.lineId,
+            latLngs:tempLatLngs
+          }
+          lineDatas.push(lineData);
+        }
+
+        let circles = lineCirclePair.circles;
+        let idx = circles.findIndex(circle => {
+          let circleLatLng = circle.latLng;
+          let center = map.latLngToContainerPoint(circleLatLng);
+          return DrawTools.isInBounds(movePoint, center, CONFIG.circleBuffer);
+        });
+
+        if (idx > -1) {
+          circles[idx].remove();
+          circles.splice(idx, 1);
+        }
+      });
+      if (self.lineDeletePoint){
+        self.lineDeletePoint(lineDatas);
       }
     });
   },
@@ -1267,18 +1558,24 @@ let LinesSet = {
    * @param lineData
    */
   draw (lineData) {
-    if (!lineData || lineData.length == 0 ){
+    let id = lineData.id;
+    let latLngs = lineData.latLngs;
+    if (!latLngs || latLngs.length == 0 ){
       return;
     }
     // 叠加已有的线
     let lineCirclePair = new LineCirclePair();
     lineCirclePair.drawOld(lineData);
+
+    // 存储已存在的线圆组合实例
+    this.lineCirclePairs.push(lineCirclePair);
   },
   /**
    * 从头开始，绘制新线
    */
-  drawNewLine (options) {
-    this.callback = options.callback;
+  drawNewLine () {
+    // 删除上一次标绘但未保存的线
+    this.remove();
     // 暂时取消所有图形的点击事件，绘制完成再恢复
     evtMgr.fire('on-cancelClickEvent');
     // 新编辑线实例
@@ -1287,6 +1584,42 @@ let LinesSet = {
     this.mapClickFn = this.mapClick.bind(this, lineCirclePair);
     this.mouseMoveFn = null;
     map.on('click', this.mapClickFn, this);
+    // 存储新绘制的线圆组合实例
+    this.lineCirclePairs.push(lineCirclePair);
+  },
+  /**
+   * 根据Id移除线
+   * @param lineId
+   */
+  remove(lineId){
+    if (lineId == 'undefined'){
+      lineId = undefined;
+    }
+    let idx = this.lineCirclePairs.findIndex(lineCirclePair => {
+      return lineCirclePair.lineId == lineId;
+    });
+    if (idx > -1){
+      this.lineCirclePairs[idx].remove();
+      this.lineCirclePairs.splice(idx, 1);
+    }
+    if (lineId){
+      return;
+    }
+    // 回退新标的线与已存在的线的交点
+    cacheInsertLines.forEach(line => {
+      let idxes = line.newInsertIdxes;
+      let tempLatLngs = [];
+      line.latLngs.forEach((latLng, idx) => {
+        if (!idxes.includes(idx)){
+          tempLatLngs.push(latLng);
+        }
+      });
+      // 重绘
+      line.redraw(tempLatLngs);
+      line.newInsertIdxes = [];
+    });
+
+    cacheInsertLines = [];
   },
   /**
    * 地图点击事件，开始绘制线
